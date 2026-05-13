@@ -22,7 +22,7 @@ def load_prompt_file(filename):
 load_dotenv() 
 
 LLM_API_KEY = os.getenv("GOOGLE_API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME", "gemma-3-27b-it")
+MODEL_NAME = os.getenv("MODEL_NAME", "gemma-4-31b-it")
 
 if not LLM_API_KEY:
     print("❌ [Env] 找不到 GOOGLE_API_KEY！")
