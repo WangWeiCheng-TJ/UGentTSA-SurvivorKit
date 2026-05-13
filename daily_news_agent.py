@@ -168,7 +168,7 @@ class NewsAgent:
             elif "2" in level: icon = "🟡"
 
             # 顯示這則新聞的中文標題 (讓你知道它生成了什麼)
-            tqdm.write(f"   {icon} [{item['date']}] {title_zh} ({action})")
+            tqdm.write(f"   {icon} [{item['date']}] [{level}] [{audience}] [{topic}] {title_zh} ({action}): {summary}")
 
             if self.sheet:
                 try:
