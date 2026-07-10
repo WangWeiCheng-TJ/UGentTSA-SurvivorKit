@@ -221,15 +221,17 @@ export default function PortalView() {
       return;
     }
 
-    // 2. 安卓流派 (Android Intent) - 業界標準做法
-    // 格式：intent://<scheme>#Intent;scheme=<scheme>;package=<packageId>;S.browser_fallback_url=<storeUrl>;end
-    // 效果：有裝->開App，沒裝->去商店。OS 自己判斷，不用 JS。
+    // 2. 安卓：先嘗試 scheme，300ms 後沒開起來就去 Play Store
     if (isAndroid) {
-      // 移除 scheme 結尾的 :// (例如 itsme:// 變成 itsme)
-      const cleanScheme = links.scheme.replace('://', '');
-      const intentUrl = `intent://${cleanScheme}#Intent;scheme=${cleanScheme};package=${links.packageId};S.browser_fallback_url=https://play.google.com/store/apps/details?id=${links.packageId};end`;
-      
-      window.location.href = intentUrl;
+      const storeUrl = `https://play.google.com/store/apps/details?id=${links.packageId}`;
+      const start = Date.now();
+      window.location.href = links.scheme;
+      setTimeout(() => {
+        // 如果頁面還在前景（App 沒接走），就去 Play Store
+        if (Date.now() - start < 1500) {
+          window.location.href = storeUrl;
+        }
+      }, 300);
       return;
     }
 
