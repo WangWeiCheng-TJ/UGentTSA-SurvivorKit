@@ -148,10 +148,10 @@ class NewsAgent:
             # 預設空值
             level, audience, topic, title_zh, summary, action = "1", "-", "其他", "解析失敗", "AI Error", "-"
             
-            if self.model and self.analysis_prompt_template:
+            if self.client and self.analysis_prompt_template:
                 try:
                     prompt = self.analysis_prompt_template.format(title=item['title'])
-                    response = self.model.generate_content(prompt)
+                    response = self.client.models.generate_content(model=MODEL_NAME, contents=prompt)
                     text = response.text.strip()
 
                     # 從每一行裡找第一行有 5 個以上 '|' 的（即 6 欄格式）
