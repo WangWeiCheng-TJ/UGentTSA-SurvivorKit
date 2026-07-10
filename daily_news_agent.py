@@ -2,7 +2,7 @@ import os
 import time
 import feedparser
 import gspread
-from google import genai
+import google.generativeai as genai
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from time import mktime
@@ -26,8 +26,8 @@ MODEL_NAME = os.getenv("MODEL_NAME", "gemma-4-31b-it")
 
 if not LLM_API_KEY:
     print("❌ [Env] 找不到 GOOGLE_API_KEY！")
-
-client = genai.Client(api_key=LLM_API_KEY) if LLM_API_KEY else None
+else:
+    genai.configure(api_key=LLM_API_KEY)
 
 # --- 2. 設定區 ---
 RSS_URL = "https://stad.gent/nl/nieuws-evenementen/rss"
@@ -40,7 +40,7 @@ DAYS_LOOKBACK = 30
 
 class NewsAgent:
     def __init__(self):
-        self.client = client
+        self.model = genai.GenerativeModel(MODEL_NAME) if LLM_API_KEY else None
         self.setup_gsheet()
         self.date_prompt_template = load_prompt_file("date_parser.txt")
         self.analysis_prompt_template = load_prompt_file("news_analysis.txt")
@@ -70,11 +70,11 @@ class NewsAgent:
         🛡️ 防禦性 AI 呼叫函式
         遇到 429 (Rate Limit) 就睡覺重試，不會直接死掉。
         """
-        if not self.client: return None
+        if not self.model: return None
 
         for attempt in range(max_retries):
             try:
-                response = self.client.models.generate_content(model=MODEL_NAME, contents=prompt)
+                response = self.model.generate_content(prompt)
                 return response
             except Exception as e:
                 error_msg = str(e)
@@ -91,12 +91,12 @@ class NewsAgent:
         return None # 試了 3 次都失敗，放棄
 
     def parse_entry_date_with_ai(self, entry):
-        if not self.client or not self.date_prompt_template:
+        if not self.model or not self.date_prompt_template:
             return datetime.now()
         try:
             entry_dump = f"Title: {entry.title}\nLink: {entry.link}\nPublished: {entry.get('published', 'N/A')}\nUpdated: {entry.get('updated', 'N/A')}\nDesc: {entry.get('description', '')[:200]}"
             prompt = self.date_prompt_template.format(entry_data=entry_dump)
-            response = self.client.models.generate_content(model=MODEL_NAME, contents=prompt)
+            response = self.model.generate_content(prompt)
             date_text = response.text.strip().replace('"', '').replace("'", "")
             return datetime.strptime(date_text, "%Y-%m-%d")
         except:
@@ -148,10 +148,10 @@ class NewsAgent:
             # 預設空值
             level, audience, topic, title_zh, summary, action = "1", "-", "其他", "解析失敗", "AI Error", "-"
             
-            if self.client and self.analysis_prompt_template:
+            if self.model and self.analysis_prompt_template:
                 try:
                     prompt = self.analysis_prompt_template.format(title=item['title'])
-                    response = self.client.models.generate_content(model=MODEL_NAME, contents=prompt)
+                    response = self.model.generate_content(prompt)
                     text = response.text.strip()
 
                     # 從每一行裡找第一行有 5 個以上 '|' 的（即 6 欄格式）
