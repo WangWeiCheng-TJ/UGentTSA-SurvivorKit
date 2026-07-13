@@ -8,7 +8,10 @@ const API_URL =
 async function getNews() {
   try {
     // ✅ 恢復了 ISR 60秒更新！Vercel 伺服器會幫你擋流量，每分鐘才去煩 Google 一次
-    const res = await fetch(API_URL, { next: { revalidate: 60 } });
+    const fetchOptions = process.env.NODE_ENV === 'development'
+      ? { cache: 'no-store' as const }
+      : { next: { revalidate: 60 } };
+    const res = await fetch(API_URL, fetchOptions);
     if (!res.ok) {
       throw new Error("Failed to fetch data");
     }
