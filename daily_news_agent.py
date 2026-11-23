@@ -1,8 +1,12 @@
 import os
+import re
+import sys
 import time
 import feedparser
 import gspread
+import httpx
 from google import genai
+from google.genai import errors as genai_errors
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from time import mktime
@@ -38,9 +42,19 @@ CREDENTIALS_FILE = "googlesheetapi.json"
 FETCH_LIMIT = 60
 DAYS_LOOKBACK = 30
 
+
+class AIFatalError(Exception):
+    """整個 run 都不該繼續 (額度用完、key 無效、模型不存在等)。"""
+
+
+class AIItemError(Exception):
+    """只有這一筆失敗：不寫入 Sheet，下次執行會自動重試。"""
+
+
 class NewsAgent:
     def __init__(self):
         self.model = _genai_client
+        self.failures = []  # (連結, 原因)
         self.setup_gsheet()
         self.date_prompt_template = load_prompt_file("date_parser.txt")
         self.analysis_prompt_template = load_prompt_file("news_analysis.txt")
@@ -67,40 +81,73 @@ class NewsAgent:
 
     def call_ai_with_retry(self, prompt, max_retries=3):
         """
-        🛡️ 防禦性 AI 呼叫函式
-        遇到 429 (Rate Limit) 就睡覺重試，不會直接死掉。
+        🛡️ 防禦性 AI 呼叫函式，成功時回傳非空字串。
+        - 429 (Rate Limit)：休息後重試，重試完仍失敗就中止整個 run。
+        - 其他 4xx (例如 402 額度用完、403 key 無效、404 模型不存在)：重試沒用，立刻中止。
+        - 5xx / 連線錯誤：重試，仍失敗則只跳過這一筆。
         """
-        if not self.model: return None
+        if not self.model:
+            raise AIFatalError("找不到 GOOGLE_API_KEY")
 
-        for attempt in range(max_retries):
+        last_error = None
+        for attempt in range(1, max_retries + 1):
             try:
                 response = self.model.models.generate_content(model=MODEL_NAME, contents=prompt)
-                return response
-            except Exception as e:
-                error_msg = str(e)
-                # 如果是 429 錯誤 (Rate Limit)
-                if "429" in error_msg or "quota" in error_msg.lower():
-                    wait_time = 60 # 罰站 35 秒 (比 Google 建議的 23 秒多一點以策安全)
-                    tqdm.write(f"   ⏳ API 額度滿了，休息 {wait_time} 秒後重試 ({attempt+1}/{max_retries})...")
-                    time.sleep(wait_time)
-                else:
-                    # 如果是其他錯誤 (例如 Server Error)，稍微等一下再試
-                    tqdm.write(f"   ⚠️ AI 呼叫錯誤: {e}，重試中...")
-                    time.sleep(15)
-        
-        return None # 試了 3 次都失敗，放棄
+            except genai_errors.ClientError as e:
+                if e.code != 429:
+                    raise AIFatalError(str(e)) from e
+                last_error, wait_time = e, 60
+            except (genai_errors.ServerError, httpx.TransportError) as e:
+                last_error, wait_time = e, 15
+            else:
+                text = (response.text or "").strip()
+                if not text:
+                    raise AIItemError("AI 回傳空內容")
+                return text
+
+            if attempt < max_retries:
+                tqdm.write(f"   ⏳ AI 呼叫錯誤: {last_error}，{wait_time} 秒後重試 ({attempt}/{max_retries})...")
+                time.sleep(wait_time)
+
+        if isinstance(last_error, genai_errors.ClientError):
+            raise AIFatalError(f"重試 {max_retries} 次仍是 429: {last_error}") from last_error
+        raise AIItemError(f"重試 {max_retries} 次仍失敗: {last_error}") from last_error
+
+    def record_failure(self, link, reason):
+        self.failures.append((link, str(reason)))
+        tqdm.write(f"⚠️ 跳過 {link}: {reason}")
 
     def parse_entry_date_with_ai(self, entry):
-        if not self.model or not self.date_prompt_template:
+        if not self.date_prompt_template:
+            raise AIFatalError("找不到 prompts/date_parser.txt")
+        entry_dump = f"Title: {entry.title}\nLink: {entry.link}\nPublished: {entry.get('published', 'N/A')}\nUpdated: {entry.get('updated', 'N/A')}\nDesc: {entry.get('description', '')[:200]}"
+        prompt = self.date_prompt_template.format(entry_data=entry_dump)
+        text = self.call_ai_with_retry(prompt)
+
+        # 模型可能多說廢話；只有剛好出現一個日期時才採用
+        dates = set(re.findall(r"\d{4}-\d{2}-\d{2}", text))
+        if len(dates) == 1:
+            try:
+                return datetime.strptime(dates.pop(), "%Y-%m-%d")
+            except ValueError as e:
+                raise AIItemError(f"日期解析失敗: {text[:100]}") from e
+        # prompt 約定：無法判斷日期時輸出 TODAY
+        if not dates and text.strip("\"'. ").upper() == "TODAY":
             return datetime.now()
-        try:
-            entry_dump = f"Title: {entry.title}\nLink: {entry.link}\nPublished: {entry.get('published', 'N/A')}\nUpdated: {entry.get('updated', 'N/A')}\nDesc: {entry.get('description', '')[:200]}"
-            prompt = self.date_prompt_template.format(entry_data=entry_dump)
-            response = self.model.models.generate_content(model=MODEL_NAME, contents=prompt)
-            date_text = response.text.strip().replace('"', '').replace("'", "")
-            return datetime.strptime(date_text, "%Y-%m-%d")
-        except:
-            return datetime.now()
+        raise AIItemError(f"日期解析失敗: {text[:100]}")
+
+    def analyze_title(self, title):
+        if not self.analysis_prompt_template:
+            raise AIFatalError("找不到 prompts/news_analysis.txt")
+        text = self.call_ai_with_retry(self.analysis_prompt_template.format(title=title))
+
+        # 從每一行裡找第一行有 5 個以上 '|' 的（即 6 欄格式）
+        # 跳過模型多說的廢話或空行
+        for line in text.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 6:
+                return [p.strip() for p in parts[:6]]
+        raise AIItemError(f"格式解析失敗，原始輸出: {text[:100]}")
 
     def fetch_and_filter(self):
         print(f"📡 連線 RSS 伺服器...")
@@ -122,7 +169,11 @@ class NewsAgent:
             link = entry.link
             if link in existing_links: continue
 
-            pub_date = self.parse_entry_date_with_ai(entry)
+            try:
+                pub_date = self.parse_entry_date_with_ai(entry)
+            except AIItemError as e:
+                self.record_failure(link, e)
+                continue
             time.sleep(0.3)
 
             if pub_date >= cutoff_date:
@@ -145,32 +196,13 @@ class NewsAgent:
         count = 0
         
         for item in tqdm(news_list, desc="🤖 生成情報", unit="筆"):
-            # 預設空值
-            level, audience, topic, title_zh, summary, action = "1", "-", "其他", "解析失敗", "AI Error", "-"
-            
-            if self.model and self.analysis_prompt_template:
-                try:
-                    prompt = self.analysis_prompt_template.format(title=item['title'])
-                    response = self.model.models.generate_content(model=MODEL_NAME, contents=prompt)
-                    text = response.text.strip()
+            try:
+                level, audience, topic, title_zh, summary, action = self.analyze_title(item['title'])
+            except AIItemError as e:
+                # 不寫入 Sheet：一旦連結進了 H 欄，之後就不會再重跑
+                self.record_failure(item['link'], e)
+                continue
 
-                    # 從每一行裡找第一行有 5 個以上 '|' 的（即 6 欄格式）
-                    # 跳過模型多說的廢話或空行
-                    parsed = False
-                    for line in text.splitlines():
-                        parts = line.split("|")
-                        if len(parts) >= 6:
-                            level, audience, topic, title_zh, summary, action = [p.strip() for p in parts[:6]]
-                            parsed = True
-                            break
-
-                    if not parsed:
-                        tqdm.write(f"⚠️ 格式解析失敗，原始輸出: {text[:100]}")
-                        summary = text[:200]
-
-                except Exception as e:
-                    tqdm.write(f"⚠️ AI Content Error: {e}")
-            
             icon = "🟢"
             if "3" in level: icon = "🔴"
             elif "2" in level: icon = "🟡"
@@ -193,11 +225,27 @@ class NewsAgent:
                     ])
                     count += 1
                 except Exception as e:
-                    tqdm.write(f"❌ 寫入失敗: {e}")
+                    self.record_failure(item['link'], f"寫入失敗: {e}")
             
             time.sleep(2.0) 
 
-        print(f"🎉 全部完成！Google Sheet 新增 {count} 筆情報。")
+        print(f"🏁 處理完成：Google Sheet 新增 {count} / 應處理 {len(news_list)} 筆情報。")
+
+def main():
+    agent = NewsAgent()
+    try:
+        agent.run()
+    except AIFatalError as e:
+        # ::error:: 會顯示在 GitHub Actions 的 run 摘要
+        print(f"::error::AI 無法使用，已中止: {e}")
+        return 1
+    if agent.failures:
+        print(f"::error::有 {len(agent.failures)} 筆失敗，未寫入 Sheet，下次執行會重試")
+        for link, reason in agent.failures:
+            print(f"   - {link}: {reason}")
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    NewsAgent().run()
+    sys.exit(main())
