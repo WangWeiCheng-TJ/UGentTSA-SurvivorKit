@@ -12,6 +12,7 @@ import PortalView from "@/components/PortalView";
 import AboutModal from "@/components/AboutModal";
 import ReportModal from "@/components/ReportModal";
 import { guideData } from "@/config/guideData"; 
+import { getPinnedNews, sortByDateDesc } from "@/lib/news";
 
 // 引入圖示
 import { 
@@ -198,9 +199,9 @@ export default function MainView({
 
   // --- 新聞資料分級處理 ---
   // Level 3: 紅色警戒 (緊急)
-  const redAlerts = initialNewsData.filter(item => String(item.Level) === "3");
+  const redAlerts = sortByDateDesc(initialNewsData.filter(item => String(item.Level) === "3"));
   // Level 2: 藍色置頂 (重要)
-  const pinnedNews = initialNewsData.filter(item => String(item.Level) === "2");
+  const pinnedNews = getPinnedNews(initialNewsData);
   // Level 1: 一般動態
   const normalNews = initialNewsData.filter(item => String(item.Level) === "1" || !item.Level);
   
