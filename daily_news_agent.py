@@ -1,3 +1,4 @@
+import html
 import os
 import re
 import sys
@@ -41,6 +42,12 @@ CREDENTIALS_FILE = "googlesheetapi.json"
 
 FETCH_LIMIT = 60
 DAYS_LOOKBACK = 30
+
+
+def clean_description(raw):
+    """RSS description 轉純文字：去掉 HTML 標籤與實體、壓成一行。沒有內容時回傳空字串。"""
+    text = html.unescape(re.sub(r"<[^>]+>", " ", raw or ""))
+    return " ".join(text.split())
 
 
 class AIFatalError(Exception):
@@ -136,10 +143,11 @@ class NewsAgent:
             return datetime.now()
         raise AIItemError(f"日期解析失敗: {text[:100]}")
 
-    def analyze_title(self, title):
+    def analyze_news(self, title, description):
         if not self.analysis_prompt_template:
             raise AIFatalError("找不到 prompts/news_analysis.txt")
-        text = self.call_ai_with_retry(self.analysis_prompt_template.format(title=title))
+        text = self.call_ai_with_retry(self.analysis_prompt_template.format(
+            title=title, description=description or "(無)"))
 
         # 從每一行裡找第一行有 5 個以上 '|' 的（即 6 欄格式）
         # 跳過模型多說的廢話或空行
@@ -180,6 +188,7 @@ class NewsAgent:
                 valid_items.append({
                     "date": pub_date.strftime("%Y-%m-%d"),
                     "title": entry.title, # 還是要傳荷蘭文標題給 AI 分析用
+                    "description": clean_description(entry.get("description", "")),
                     "link": link
                 })
 
@@ -197,7 +206,8 @@ class NewsAgent:
         
         for item in tqdm(news_list, desc="🤖 生成情報", unit="筆"):
             try:
-                level, audience, topic, title_zh, summary, action = self.analyze_title(item['title'])
+                level, audience, topic, title_zh, summary, action = self.analyze_news(
+                    item['title'], item['description'])
             except AIItemError as e:
                 # 不寫入 Sheet：一旦連結進了 H 欄，之後就不會再重跑
                 self.record_failure(item['link'], e)
