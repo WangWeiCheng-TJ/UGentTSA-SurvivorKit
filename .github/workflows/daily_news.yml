@@ -33,3 +33,16 @@ jobs:
           MODEL_NAME: models/gemma-4-26b-a4b-it
         run: |
           python daily_news_agent.py
+
+  # GitHub 會停用 60 天沒有活動的 public repo 排程，這裡用 API 重設計時
+  # 獨立 job：新聞抓取失敗時也會執行
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Re-enable this workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/${{ github.repository }}/actions/workflows/daily_news.yml/enable"
