@@ -13,15 +13,16 @@ def load_prompt(filename):
 
 template = load_prompt("news_analysis.txt")
 
-test_titles = [
-    "Stad Gent kondigt nieuwe parkeerregels aan in het stadscentrum",
-    "Staking bij De Lijn op vrijdag treft tram- en buslijnen in Gent",
-    "Gentse universiteiten verwelkomen recordaantal internationale studenten",
+test_items = [
+    ("Stad Gent kondigt nieuwe parkeerregels aan in het stadscentrum", "(無)"),
+    ("Staking bij De Lijn op vrijdag treft tram- en buslijnen in Gent",
+     "Door een staking rijden er vrijdag minder trams en bussen. Check de routeplanner voor je vertrekt."),
+    ("Gentse universiteiten verwelkomen recordaantal internationale studenten", "(無)"),
 ]
 
-for title in test_titles:
+for title, description in test_items:
     print(f"\n📰 原標題: {title}")
-    prompt = template.format(title=title)
+    prompt = template.format(title=title, description=description)
     response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
     text = response.text.strip()
     print(f"🤖 原始輸出: {repr(text)}")
